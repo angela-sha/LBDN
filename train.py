@@ -1,9 +1,11 @@
-import torch 
+import os
+import torch
 import numpy as np
 import time
 from model import getModel
 from dataset import getDataLoader
 from utils import *
+from margin_sweep import compute_margins
 
 def train(config):
     
@@ -187,17 +189,45 @@ def train_toy(config):
     Epochs = config.epochs
     Lr = config.lr
     steps_per_epoch = len(trainLoader)
+    PrintFreq = config.print_freq
     gamma = config.gamma
+    classification = config.dataset != 'square_wave'
 
     opt = torch.optim.Adam(model.parameters(), lr=Lr, weight_decay=0)
     lr_schedule = lambda t: np.interp([t], [0, Epochs*2//5, Epochs*4//5, Epochs], [0, Lr, Lr/20.0, 0])[0]
 
-    for epoch in range(Epochs):
+    tacc_epoch = []
+    acc36_epoch, acc72_epoch, acc108_epoch = [], [], []
+    mean_margin_epoch, min_margin_epoch = [], []
+    start_epoch = 0
+
+    ckpt_path = f"{config.train_dir}/model.ckpt"
+    if config.resume and os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location='cuda', weights_only=False)
+        if isinstance(ckpt, dict) and 'model' in ckpt:
+            model.load_state_dict(ckpt['model'])
+            opt.load_state_dict(ckpt['optimizer'])
+            start_epoch = ckpt['epoch'] + 1
+        else: # backwards compatibility
+            model.load_state_dict(ckpt)
+        txtlog(f"Resumed from {ckpt_path} at epoch {start_epoch}")
+        if classification and os.path.exists(f'{config.train_dir}/tacc_epoch.csv'):
+            tacc_epoch = list(np.atleast_1d(np.loadtxt(f'{config.train_dir}/tacc_epoch.csv')))
+            if os.path.exists(f'{config.train_dir}/mean_margin_epoch.csv'):
+                mean_margin_epoch = list(np.atleast_1d(np.loadtxt(f'{config.train_dir}/mean_margin_epoch.csv')))
+                min_margin_epoch = list(np.atleast_1d(np.loadtxt(f'{config.train_dir}/min_margin_epoch.csv')))
+            if config.cert_acc:
+                acc36_epoch = list(np.atleast_1d(np.loadtxt(f'{config.train_dir}/acc36_epoch.csv')))
+                acc72_epoch = list(np.atleast_1d(np.loadtxt(f'{config.train_dir}/acc72_epoch.csv')))
+                acc108_epoch = list(np.atleast_1d(np.loadtxt(f'{config.train_dir}/acc108_epoch.csv')))
+
+    for epoch in range(start_epoch, Epochs):
         ## train_step
-        n, Loss = 0, 0.0
+        n, Loss, Acc = 0, 0.0, 0.0
         model.train()
         for batch_idx, batch in enumerate(trainLoader):
             x, y = batch[0].cuda(), batch[1].cuda()
+            x = x.view(x.shape[0], -1)
             lr = lr_schedule(epoch + (batch_idx+1)/steps_per_epoch)
             opt.param_groups[0].update(lr=lr)
 
@@ -211,29 +241,89 @@ def train_toy(config):
             loss = J.item()
             n += y.size(0)
             Loss += loss * y.size(0)
-        
-        train_loss = Loss/n 
+            if classification:
+                Acc += (yh.max(1)[1] == y).sum().item()
+
+            if classification and (batch_idx+1) % PrintFreq == 0:
+                print(f"Epoch: {epoch+1:3d} | {batch_idx+1:3d}/{steps_per_epoch}, acc: {100*Acc/n:.1f}, loss: {Loss/n:.2f}, lr: {100*lr:.3f}", end='\r', flush=True)
+
+        train_loss = Loss/n
+        if classification:
+            train_acc = 100*Acc/n
+            tacc_epoch.append(train_acc)
 
         ## dummy call to flush the new model parameter in the last batch
-        model(torch.rand((1,x.shape[1])).to(x.device)) 
+        for m in model.modules():  # keep BN out of train mode: batch of 1 errors and would skew running stats
+            if isinstance(m, torch.nn.BatchNorm1d):
+                m.eval()
+        model(torch.rand((1,x.shape[1])).to(x.device))
 
-        n, Loss = 0, 0.0, 
+        n, Loss, Acc = 0, 0.0, 0.0
+        Acc36, Acc72, Acc108 = 0.0, 0.0, 0.0
         model.eval()
         with torch.no_grad():
             for batch_idx, batch in enumerate(testLoader):
                 x, y = batch[0].cuda(), batch[1].cuda()
+                x = x.view(x.shape[0], -1)
                 yh = model(x)
                 Loss += criterion(yh, y).item() * y.size(0)
                 n += y.size(0)
 
+                if classification:
+                    correct = yh.max(1)[1] == y
+                    Acc += correct.sum().item()
+
+                    if config.cert_acc:
+                        # certified margin: top1 - runner-up logit, vs. the perturbation
+                        # a gamma-Lipschitz network can move any logit pair by (see README)
+                        margins, _ = torch.sort(yh, 1)
+                        cert36 = (margins[:, -1] - margins[:, -2]) > np.sqrt(2.) * gamma * 36/255.0
+                        cert72 = (margins[:, -1] - margins[:, -2]) > np.sqrt(2.) * gamma * 72/255.0
+                        cert108= (margins[:, -1] - margins[:, -2]) > np.sqrt(2.) * gamma *108/255.0
+
+                        Acc36 += torch.sum(correct & cert36).item()
+                        Acc72 += torch.sum(correct & cert72).item()
+                        Acc108+= torch.sum(correct & cert108).item()
+
         test_loss = Loss/n
 
-        txtlog(f"Epoch: {epoch+1:3d} | loss: {train_loss:.2f}/{test_loss:.2f}, 100lr: {100*lr:.3f}")
-            
+        if classification:
+            test_acc = 100*Acc/n
+
+            # margin (top1 - runner-up logit) on correctly classified test samples
+            margins, correct_mask = compute_margins(model, testLoader, x.device)
+            correct_margins = margins[correct_mask]
+            mean_margin = correct_margins.mean().item() if correct_margins.numel() else float('nan')
+            min_margin = correct_margins.min().item() if correct_margins.numel() else float('nan')
+            mean_margin_epoch.append(mean_margin)
+            min_margin_epoch.append(min_margin)
+
+            if config.cert_acc:
+                Acc36, Acc72, Acc108 = 100.0*Acc36/n, 100.0*Acc72/n, 100.0*Acc108/n
+                acc36_epoch.append(Acc36)
+                acc72_epoch.append(Acc72)
+                acc108_epoch.append(Acc108)
+                txtlog(f"Epoch: {epoch+1:3d} | loss: {train_loss:.2f}/{test_loss:.2f}, acc: {train_acc:.1f}/{test_acc:.1f}, cert: {Acc36:.1f}/{Acc72:.1f}/{Acc108:.1f}, margin: {mean_margin:.4f}/{min_margin:.4f}, 100lr: {100*lr:.3f}")
+            else:
+                txtlog(f"Epoch: {epoch+1:3d} | loss: {train_loss:.2f}/{test_loss:.2f}, acc: {train_acc:.1f}/{test_acc:.1f}, margin: {mean_margin:.4f}/{min_margin:.4f}, 100lr: {100*lr:.3f}")
+        else:
+            txtlog(f"Epoch: {epoch+1:3d} | loss: {train_loss:.2f}/{test_loss:.2f}, 100lr: {100*lr:.3f}")
+
         if epoch % config.save_freq == 0 or epoch + 1 == Epochs:
-            torch.save(model.state_dict(), f"{config.train_dir}/model.ckpt")
-    
+            ckpt_obj = {'model': model.state_dict(), 'optimizer': opt.state_dict(), 'epoch': epoch}
+            torch.save(ckpt_obj, ckpt_path)  # latest, for --resume
+            torch.save(ckpt_obj, f"{config.train_dir}/model_epoch{epoch+1}.ckpt")  # permanent snapshot
+
     # after training
+    if classification:
+        np.savetxt(f'{config.train_dir}/tacc_epoch.csv', np.array(tacc_epoch))
+        np.savetxt(f'{config.train_dir}/mean_margin_epoch.csv', np.array(mean_margin_epoch))
+        np.savetxt(f'{config.train_dir}/min_margin_epoch.csv', np.array(min_margin_epoch))
+        if config.cert_acc:
+            np.savetxt(f'{config.train_dir}/acc36_epoch.csv', np.array(acc36_epoch))
+            np.savetxt(f'{config.train_dir}/acc72_epoch.csv', np.array(acc72_epoch))
+            np.savetxt(f'{config.train_dir}/acc108_epoch.csv', np.array(acc108_epoch))
+
     xshape = (config.lip_batch_size, config.in_channels)
     x = (torch.rand(xshape) + 0.3*torch.randn(xshape)).cuda()
     gam = empirical_lipschitz(model, x)

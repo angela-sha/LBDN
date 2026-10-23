@@ -184,81 +184,50 @@ class Toy(nn.Module):
         self.in_channels = config.in_channels
         self.img_size = config.img_size
         self.num_classes = config.num_classes
-        self.gamma = config.gamma 
+        self.gamma = config.gamma
         self.layer = config.layer
+        self.width = config.width
+        self.depth = config.depth
+        self.dropout = config.dropout
+        self.batchnorm = getattr(config, 'batchnorm', False)
         g = self.gamma ** 0.5
+        w = self.width
+        n_hidden = self.depth
+        # optional BatchNorm on the activations after each hidden layer. NOTE: BN is not
+        # Lipschitz-1, so the gamma bound no longer holds for the network when enabled.
+        bn = lambda: [nn.BatchNorm1d(w)] if self.batchnorm else []
 
         if self.layer == 'Plain':
             self.gamma = None
-            w = 128
-            self.model = nn.Sequential(
-                nn.Linear(self.in_channels, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, w), nn.ReLU(),
-                nn.Linear(w, self.num_classes)
-            )
+            layer = [nn.Linear(self.in_channels, w), nn.ReLU()] + bn() + [nn.Dropout(self.dropout)]
+            for _ in range(n_hidden):
+                layer += [nn.Linear(w, w), nn.ReLU()] + bn() + [nn.Dropout(self.dropout)]
+            layer.append(nn.Linear(w, self.num_classes))
+            self.model = nn.Sequential(*layer)
         elif self.layer == 'Sandwich':
-            w = 86
-            self.model = nn.Sequential(
-                SandwichFc(self.in_channels, w, scale=g),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichFc(w, w),
-                SandwichLin(w, self.num_classes, scale=g)
-            )
+            layer = [SandwichFc(self.in_channels, w, scale=g)] + bn()
+            for _ in range(n_hidden):
+                layer += [SandwichFc(w, w)] + bn()
+            layer.append(SandwichLin(w, self.num_classes, scale=g))
+            self.model = nn.Sequential(*layer)
         elif self.layer == 'Orthogon':
-            w = 128
-            self.model = nn.Sequential(
-                OrthogonFc(self.in_channels, w, scale=g),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonFc(w, w),
-                OrthogonLin(w, self.num_classes, scale=g)
-            )
+            layer = [OrthogonFc(self.in_channels, w, scale=g)] + bn()
+            for _ in range(n_hidden):
+                layer += [OrthogonFc(w, w)] + bn()
+            layer.append(OrthogonLin(w, self.num_classes, scale=g))
+            self.model = nn.Sequential(*layer)
         elif self.layer == 'Aol':
-            w = 128
-            self.model = nn.Sequential(
-                AolFc(self.in_channels, w, scale=g),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolFc(w, w),
-                AolLin(w, self.num_classes, scale=g)
-            )
+            layer = [AolFc(self.in_channels, w, scale=g)] + bn()
+            for _ in range(n_hidden):
+                layer += [AolFc(w, w)] + bn()
+            layer.append(AolLin(w, self.num_classes, scale=g))
+            self.model = nn.Sequential(*layer)
         elif self.layer == 'SLL':
-            w = 128
-            self.model = nn.Sequential(
-                PaddingFeatures(self.in_channels, w, scale=g),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                SLLBlockFc(w, w),
-                FirstChannel(self.num_classes, scale=g)
-            )
+            layer = [PaddingFeatures(self.in_channels, w, scale=g)] + bn()
+            for _ in range(n_hidden):
+                layer += [SLLBlockFc(w, w)] + bn()
+            layer.append(FirstChannel(self.num_classes, scale=g))
+            self.model = nn.Sequential(*layer)
 
     def forward(self, x):
         return self.model(x)

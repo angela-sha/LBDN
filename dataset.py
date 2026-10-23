@@ -13,7 +13,8 @@ def getDataLoader(config):
         'cifar10': cifar10_loaders,
         'cifar100': cifar100_loaders,
         'tiny_imagenet': tiny_imagenet_loaders,
-        'square_wave': square_wave_loaders
+        'square_wave': square_wave_loaders,
+        'mnist': mnist_loaders
     }[config.dataset]
     return loaders(config)
 

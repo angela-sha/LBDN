@@ -11,9 +11,12 @@ def main(args):
 
     config.lip_batch_size = 64
     config.print_freq = 10
-    config.save_freq = 5
-    
-    if config.dataset == 'cifar10':
+
+    if config.dataset == 'mnist':
+        config.in_channels = 1
+        config.img_size = 28
+        config.num_classes = 10
+    elif config.dataset == 'cifar10':
         config.in_channels = 3
         config.img_size = 32
         config.num_classes = 10
@@ -80,11 +83,20 @@ def main(args):
             config.depth_linear = 15
             config.n_features   = 4096
     elif config.model == 'Toy':
-        config.loss = 'mse'
         if config.scale is None:
             config.scale = 'small'
         if config.layer is None:
             config.layer = 'Plain'
+        if config.depth is None:
+            config.depth = 8
+        if config.width is None:
+            config.width = 128
+        if config.dropout is None:
+            config.dropout = 0.2 if config.layer == 'Plain' else 0.0
+        if config.dataset == 'square_wave':
+            config.loss = 'mse'
+        else:
+            config.in_channels = config.in_channels * config.img_size * config.img_size
 
     if config.loss == 'xent':
         config.offset = 1.5
@@ -95,6 +107,14 @@ def main(args):
         config.train_dir = f"{config.root_dir}_seed{config.seed}/{config.dataset}/{config.model}-{config.layer}-{config.scale}-LLN-gamma{config.gamma:.1f}"
     else:
         config.train_dir = f"{config.root_dir}_seed{config.seed}/{config.dataset}/{config.model}-{config.layer}-{config.scale}-gamma{config.gamma:.1f}"
+
+    if config.model == 'Toy':
+        config.train_dir += f"-w{config.width}-d{config.depth}-{config.loss}"
+        # non-default settings get their own dir so they don't clobber earlier runs
+        if config.loss == 'multimargin' and config.margin != 0.5:
+            config.train_dir += f"-margin{config.margin:g}"
+        if config.batchnorm:
+            config.train_dir += "-bn"
 
     os.makedirs("./data", exist_ok=True)
     os.makedirs(config.train_dir, exist_ok=True)
@@ -116,7 +136,7 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--model', type=str, default='Resnet',
                         help="[DNN, KWL, Resnet, Toy]")
     parser.add_argument('-d', '--dataset', type=str, default='tiny_imagenet',
-                        help="dataset [cifar10, cifar100, tiny_imagenet, square_wave]")
+                        help="dataset [mnist, cifar10, cifar100, tiny_imagenet, square_wave]")
     parser.add_argument('-g', '--gamma', type=float, default=1.0,
                         help="Network Lipschitz bound")
     parser.add_argument('-s', '--seed', type=int, default=123)
@@ -124,9 +144,19 @@ if __name__ == '__main__':
 
     parser.add_argument('--layer', type=str, default='SLL')
     parser.add_argument('--scale', type=str, default='xlarge')
+    parser.add_argument('--width', type=int, default=None,
+                        help="hidden layer width (Toy model only)")
+    parser.add_argument('--depth', type=int, default=None,
+                        help="number of hidden linear layers (Toy model only)")
+    parser.add_argument('--dropout', type=float, default=None,
+                        help="dropout probability after each hidden layer (Toy Plain layer only)")
     parser.add_argument('--lr', type=float, default=0.01,
                         help="learning rate")
     parser.add_argument('--loss', type=str, default='xent')
+    parser.add_argument('--margin', type=float, default=0.5,
+                        help="margin for --loss multimargin")
+    parser.add_argument('--batchnorm', action='store_true',
+                        help="add BatchNorm1d after each hidden layer (Toy model only)")
     parser.add_argument('--root_dir', type=str, default='./saved_models')
     parser.add_argument('--train_batch_size', type=int, default=256)
     parser.add_argument('--test_batch_size', type=int, default=256)
@@ -134,6 +164,11 @@ if __name__ == '__main__':
     parser.add_argument('--LLN', action='store_true')
     parser.add_argument('--normalized', action='store_true')
     parser.add_argument('--cert_acc', action='store_true')
+    parser.add_argument('--resume', action='store_true',
+                        help="resume from the checkpoint in train_dir if one exists (Toy model only)")
+    parser.add_argument('--save_freq', type=int, default=5,
+                        help="save a checkpoint every N epochs (Toy model also keeps a "
+                             "permanent snapshot per interval, not just the latest)")
     
     args = parser.parse_args()
 

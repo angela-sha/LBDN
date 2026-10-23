@@ -14,8 +14,8 @@ def evaluate_toy(config):
     xshape = (config.lip_batch_size, config.in_channels)
     x = (torch.rand(xshape) + 0.3*torch.randn(xshape)).cuda()
     model(x)
-    model_state = torch.load(f"{config.train_dir}/model.ckpt")
-    model.load_state_dict(model_state)
+    ckpt = torch.load(f"{config.train_dir}/model.ckpt", weights_only=False)
+    model.load_state_dict(ckpt['model'] if isinstance(ckpt, dict) and 'model' in ckpt else ckpt)
     layer_lip = np.zeros(10)
     layer_norm= np.zeros(10)
     if model.layer == 'Sandwich':
@@ -67,7 +67,7 @@ def evaluate(config):
     xshape = (1, config.in_channels, config.img_size, config.img_size)
     x = (torch.rand(xshape) + 0.3*torch.randn(xshape)).cuda()
     model(x) # allocate memory for Q param
-    model_state = torch.load(f"{config.train_dir}/model.ckpt")
+    model_state = torch.load(f"{config.train_dir}/model.ckpt", weights_only=False)
     model.load_state_dict(model_state)
     model(x) # update Q param
     mean = {

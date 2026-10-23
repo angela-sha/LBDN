@@ -52,7 +52,7 @@ def getLoss(config):
     elif config.loss == 'xent':
         crition = Xent(config.num_classes, offset=config.offset)
     elif config.loss == 'multimargin':
-        crition = MultiMargin()
+        crition = MultiMargin(margin=config.margin)
     return crition
 
 class MultiMargin(nn.Module):
